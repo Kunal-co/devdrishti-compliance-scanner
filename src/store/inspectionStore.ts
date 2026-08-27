@@ -13,6 +13,8 @@ interface InspectionState {
     location?: string
   ) => string;
   addFinding: (finding: Finding) => void;
+  addProductImage: (imageUrl: string) => void;
+  addOcrAnnotations: (annotations: any[]) => void;
   updateFinding: (fieldName: string, decision: string, finalValue?: string, note?: string) => void;
   completeInspection: (overallStatus: 'COMPLIANT' | 'NON_COMPLIANT' | 'NEEDS_FURTHER_ACTION') => void;
   saveToHistory: () => void;
@@ -58,6 +60,7 @@ export const useInspectionStore = create<InspectionState>((set, get) => ({
       violations_count: 0,
       store_location: location || '',
       product_images: [],
+      ocr_annotations: [],
       audit_log: [
         {
           timestamp: new Date().toISOString(),
@@ -86,6 +89,30 @@ export const useInspectionStore = create<InspectionState>((set, get) => ({
               by: state.currentInspection.inspector.id,
             },
           ],
+        },
+      };
+    });
+  },
+
+  addProductImage: (imageUrl) => {
+    set((state) => {
+      if (!state.currentInspection) return state;
+      return {
+        currentInspection: {
+          ...state.currentInspection,
+          product_images: [...state.currentInspection.product_images, imageUrl],
+        },
+      };
+    });
+  },
+
+  addOcrAnnotations: (annotations) => {
+    set((state) => {
+      if (!state.currentInspection) return state;
+      return {
+        currentInspection: {
+          ...state.currentInspection,
+          ocr_annotations: [...(state.currentInspection.ocr_annotations || []), ...annotations],
         },
       };
     });
