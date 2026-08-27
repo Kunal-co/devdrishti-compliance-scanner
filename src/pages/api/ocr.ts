@@ -108,13 +108,22 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse<
 
   try {
     const { files } = await parseForm(req);
-    const imageFile = (files as any).image;
+    // formidable v3 always returns files as arrays (files.image => [File]),
+    // regardless of the `multiples` option, so normalize before use.
+    const rawImage = (files as any).image;
+    const imageFile = Array.isArray(rawImage) ? rawImage[0] : rawImage;
     if (!imageFile) {
       res.status(400).json({ error: 'No image uploaded' });
       return;
     }
 
-    const buffer = fs.readFileSync(imageFile.filepath || imageFile.path);
+    const filepath = imageFile.filepath || imageFile.path;
+    if (!filepath) {
+      res.status(500).json({ error: 'Uploaded file could not be located on disk' });
+      return;
+    }
+
+    const buffer = fs.readFileSync(filepath);
     const base64Image = buffer.toString('base64');
 
     const visionResp = await callVisionApiWithBase64(base64Image);
