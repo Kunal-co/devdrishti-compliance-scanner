@@ -14,6 +14,7 @@ type OCRResult = {
 type Props = {
   onResult: (file: File | null, result: OCRResult) => void;
   autoUpload?: boolean; // if false, wait for user to click "Upload to OCR"
+  onError?: (message: string) => void;
 };
 
 export type ImageUploaderHandle = {
@@ -21,10 +22,11 @@ export type ImageUploaderHandle = {
   hasSelected: () => boolean;
 };
 
-const ImageUploader = forwardRef<ImageUploaderHandle, Props>(({ onResult, autoUpload = true }, ref) => {
+const ImageUploader = forwardRef<ImageUploaderHandle, Props>(({ onResult, autoUpload = true, onError }, ref) => {
   const [filePreview, setFilePreview] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const handleFileSelect = (file: File | null) => {
     if (!file) return;
@@ -35,6 +37,7 @@ const ImageUploader = forwardRef<ImageUploaderHandle, Props>(({ onResult, autoUp
 
   const uploadFile = async (file: File) => {
     setUploading(true);
+    setErrorMsg(null);
     try {
       const fd = new FormData();
       fd.append('image', file);
@@ -43,11 +46,25 @@ const ImageUploader = forwardRef<ImageUploaderHandle, Props>(({ onResult, autoUp
         method: 'POST',
         body: fd,
       });
-      const data = await res.json();
+
+      let data: any = null;
+      try {
+        data = await res.json();
+      } catch {
+        throw new Error(`OCR request failed (status ${res.status})`);
+      }
+
+      if (!res.ok) {
+        throw new Error(data?.error || `OCR request failed (status ${res.status})`);
+      }
+
       // Expect server to return { text: '...', annotations: [...] }
       onResult(file, { text: data.text || '', annotations: data.annotations || [] });
-    } catch (err) {
+    } catch (err: any) {
       console.error('Upload/ocr error', err);
+      const message = err?.message || 'OCR processing failed';
+      setErrorMsg(message);
+      onError?.(message);
       onResult(file, { text: '', annotations: [] });
     } finally {
       setUploading(false);
@@ -117,6 +134,12 @@ const ImageUploader = forwardRef<ImageUploaderHandle, Props>(({ onResult, autoUp
       )}
 
       {autoUpload && uploading && <div>Processing OCR…</div>}
+
+      {errorMsg && (
+        <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">
+          ⚠ {errorMsg}
+        </div>
+      )}
     </div>
   );
 });
