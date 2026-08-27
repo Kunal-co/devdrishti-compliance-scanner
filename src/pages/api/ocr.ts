@@ -68,36 +68,71 @@ function parseForm(req: NextApiRequest) {
   });
 }
 
-async function callVisionApiWithBase64(base64Image: string) {
-  const apiKey = process.env.GOOGLE_API_KEY;
-  if (!apiKey) throw new Error('GOOGLE_API_KEY is not set in environment');
+// --- Google AI Studio (Gemini API) OCR call ---
+// Get a key from https://aistudio.google.com/apikey and set it as
+// GEMINI_API_KEY (or GOOGLE_API_KEY) in your .env.local file.
+const GEMINI_MODEL = 'gemini-2.5-flash';
 
-  const endpoint = `https://vision.googleapis.com/v1/images:annotate?key=${encodeURIComponent(apiKey)}`;
+async function callGeminiOcr(base64Image: string, mimeType: string) {
+  const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+  if (!apiKey) {
+    throw new Error(
+      'GEMINI_API_KEY is not set. Get a key from https://aistudio.google.com/apikey and add it to .env.local'
+    );
+  }
+
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
   const body = {
-    requests: [
+    contents: [
       {
-        image: { content: base64Image },
-        features: [{ type: 'TEXT_DETECTION', maxResults: 1 }],
+        parts: [
+          {
+            text:
+              'Extract ALL visible text from this product label image, exactly as it appears, ' +
+              'preserving line breaks between distinct pieces of text. ' +
+              'Return ONLY the raw extracted text — no commentary, no markdown formatting, no code fences.',
+          },
+          {
+            inline_data: {
+              mime_type: mimeType || 'image/jpeg',
+              data: base64Image,
+            },
+          },
+        ],
       },
     ],
+    generationConfig: {
+      temperature: 0,
+    },
   };
 
   const res = await fetch(endpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      'x-goog-api-key': apiKey,
     },
     body: JSON.stringify(body),
   });
 
   if (!res.ok) {
     const t = await res.text();
-    throw new Error(`Vision API error ${res.status}: ${t}`);
+    throw new Error(`Gemini API error ${res.status}: ${t}`);
   }
 
   const json = await res.json();
   return json;
+}
+
+function extractTextFromGeminiResponse(json: any): string {
+  const parts = json?.candidates?.[0]?.content?.parts;
+  if (!Array.isArray(parts)) return '';
+  return parts
+    .map((p: any) => (typeof p?.text === 'string' ? p.text : ''))
+    .filter(Boolean)
+    .join('\n')
+    .trim();
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse<Data>) {
@@ -125,17 +160,15 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse<
 
     const buffer = fs.readFileSync(filepath);
     const base64Image = buffer.toString('base64');
+    const mimeType = imageFile.mimetype || imageFile.type || 'image/jpeg';
 
-    const visionResp = await callVisionApiWithBase64(base64Image);
-    const resp0 = visionResp?.responses?.[0] || {};
-    const fullText = resp0.fullTextAnnotation?.text || resp0?.textAnnotations?.[0]?.description || '';
+    const geminiResp = await callGeminiOcr(base64Image, mimeType);
+    const fullText = extractTextFromGeminiResponse(geminiResp);
 
-    const rawAnnotations = (resp0.textAnnotations || []).slice(1).map((a: any) => ({
-      description: a.description,
-      boundingPoly: a.boundingPoly,
-    }));
-
-    res.status(200).json({ text: fullText, annotations: rawAnnotations });
+    // Gemini's generateContent doesn't return per-word bounding boxes the way
+    // Cloud Vision's TEXT_DETECTION does, so there are no overlay annotations here.
+    // The frontend already handles an empty annotations array gracefully.
+    res.status(200).json({ text: fullText, annotations: [] });
   } catch (err: any) {
     // Log server-side
     console.error('ocr api error:', err && err.stack ? err.stack : err);
