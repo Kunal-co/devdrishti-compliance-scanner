@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { useRouter } from 'next/router';
 import Head from 'next/head';
 import Link from 'next/link';
@@ -6,51 +6,90 @@ import { useInspectionStore } from '@/store/inspectionStore';
 import { useAuthStore } from '@/store/authStore';
 import mockOCRDatabase from '@/data/mockOCRDatabase.json';
 import { ExtractionResult, Finding } from '@/types';
+import ImageUploader from '@/components/ImageUploader';
+
+type Annotation = { description?: string; boundingPoly?: { vertices?: { x?: number; y?: number }[] } };
 
 export default function Scan() {
   const router = useRouter();
   const inspector = useAuthStore((state) => state.inspector);
   const createInspection = useInspectionStore((state) => state.createInspection);
   const addFinding = useInspectionStore((state) => state.addFinding);
-  
+  const addProductImage = useInspectionStore((s:any) => s.addProductImage);
+  const addOcrAnnotations = useInspectionStore((s:any) => s.addOcrAnnotations);
+
   const [productName, setProductName] = useState('');
   const [category, setCategory] = useState('');
   const [location, setLocation] = useState('');
   const [selectedProduct, setSelectedProduct] = useState<string>('');
   const [isExtracting, setIsExtracting] = useState(false);
   const [extractionResult, setExtractionResult] = useState<ExtractionResult | null>(null);
+  const [uploadedImageUrl, setUploadedImageUrl] = useState<string | null>(null);
+  const [annotations, setAnnotations] = useState<Annotation[]>([]);
+  const imgRef = useRef<HTMLImageElement | null>(null);
 
   const products = Object.keys(mockOCRDatabase);
 
-  const handleExtract = async () => {
-    if (!selectedProduct || !productName || !category || !location) {
-      alert('Please fill all fields');
+  function parseOcrIntoExtractionResult(ocrText: string): ExtractionResult {
+    const lines = ocrText.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    const text = lines.join(' ');
+    const findMRP = text.match(/(Rs\.?|₹)\s?\d+(?:[.,]\d+)?/i);
+    const findQty = text.match(/\b\d+(?:[.,]\d+)?\s*(g|kg|ml|l|L)\b/i);
+    const name = productName || lines[0] || selectedProduct || 'Unknown product';
+
+    const now = new Date().toISOString();
+    const extractions: any = {
+      product_name: { value: name, confidence: 0.9, bounding_box: '', status: 'extracted' },
+      net_quantity: { value: findQty ? findQty[0] : '', confidence: findQty ? 0.85 : 0.4, bounding_box: '', status: findQty ? 'extracted' : 'needs_review' },
+      mrp: { value: findMRP ? findMRP[0] : '', confidence: findMRP ? 0.85 : 0.4, bounding_box: '', status: findMRP ? 'extracted' : 'needs_review' },
+      manufacturer_name: { value: '', confidence: 0.4, bounding_box: '', status: 'needs_review' },
+      manufacturer_address: { value: '', confidence: 0.4, bounding_box: '', status: 'needs_review' },
+      date_of_manufacture: { value: '', confidence: 0.4, bounding_box: '', status: 'needs_review' },
+      consumer_care: { value: '', confidence: 0.4, bounding_box: '', status: 'needs_review' },
+      country_of_origin: { value: '', confidence: 0.4, bounding_box: '', status: 'needs_review' },
+    };
+
+    return {
+      product_id: selectedProduct || `OCR-${Date.now()}`,
+      product_name: name,
+      category: category || 'unknown',
+      timestamp: now,
+      extractions,
+    };
+  }
+
+  const handleOcrResult = (file: File | null, result: { text?: string; annotations?: Annotation[] }) => {
+    if (file) setUploadedImageUrl(URL.createObjectURL(file));
+    const text = result?.text ?? '';
+    const res = parseOcrIntoExtractionResult(text);
+    setExtractionResult(res);
+    setAnnotations(result.annotations || []);
+  };
+
+  const handleExtractFallback = async () => {
+    if (!selectedProduct) {
+      alert('Select a mock product or upload an image to extract from.');
       return;
     }
-
     setIsExtracting(true);
-    
-    // Simulate API call
     setTimeout(() => {
       const mockData = mockOCRDatabase[selectedProduct as keyof typeof mockOCRDatabase];
       setExtractionResult(mockData as any);
       setIsExtracting(false);
-    }, 1500);
+    }, 600);
   };
 
   const handleStartInspection = () => {
-    if (!inspector || !extractionResult) return;
+    if (!extractionResult) return;
 
-    const inspectionId = createInspection(
-      inspector.id,
-      inspector.name,
-      inspector.badge_number,
-      productName,
-      category,
-      location
-    );
+    // Create inspection (anonymous if inspector not logged in)
+    createInspection(inspector?.id, inspector?.name, inspector?.badge_number, extractionResult.product_name, extractionResult.category, location || 'Unknown');
 
-    // Add findings from extraction
+    // Persist image and annotations to inspection state (so verify can show them)
+    if (uploadedImageUrl) addProductImage(uploadedImageUrl);
+    if (annotations.length) addOcrAnnotations(annotations);
+
+    // Add findings (each finding gets evidence_link pointing to image)
     Object.entries(extractionResult.extractions).forEach(([field, data]) => {
       const mockFinding: Finding = {
         field,
@@ -58,13 +97,44 @@ export default function Scan() {
         ai_extraction: (data as any).value,
         ai_confidence: (data as any).confidence,
         ai_recommendation: (data as any).status === 'extracted' ? 'PASS' : 'NEEDS_REVIEW',
-        evidence_link: '',
-        reason: (data as any).flag || 'Data extracted successfully',
+        evidence_link: uploadedImageUrl || '',
+        reason: (data as any).flag || 'Data extracted from OCR',
       };
       addFinding(mockFinding);
     });
 
-    router.push('/verify');
+    // small tick to let state settle before navigation
+    setTimeout(() => router.push('/verify'), 50);
+  };
+
+  // compute overlay style for Vision or normalized coords
+  const computeBoxStyle = (vertices?: { x?: number; y?: number }[]) => {
+    if (!imgRef.current || !vertices || vertices.length === 0) return {};
+    const img = imgRef.current;
+    const natW = img.naturalWidth || img.width || 1;
+    const natH = img.naturalHeight || img.height || 1;
+    const displayW = img.clientWidth || 1;
+    const displayH = img.clientHeight || 1;
+    // detect normalized coords (<=1)
+    const isNormalized = vertices.every(v => (v.x || 0) <= 1 && (v.y || 0) <= 1);
+    const scaled = vertices.map(v => ({
+      x: (v.x || 0) * (isNormalized ? natW : 1),
+      y: (v.y || 0) * (isNormalized ? natH : 1),
+    }));
+    const scaleX = displayW / natW;
+    const scaleY = displayH / natH;
+    const xs = scaled.map(v => v.x * scaleX);
+    const ys = scaled.map(v => v.y * scaleY);
+    const left = Math.min(...xs);
+    const top = Math.min(...ys);
+    const right = Math.max(...xs);
+    const bottom = Math.max(...ys);
+    return {
+      left: `${left}px`,
+      top: `${top}px`,
+      width: `${Math.max(1, right - left)}px`,
+      height: `${Math.max(1, bottom - top)}px`,
+    } as React.CSSProperties;
   };
 
   return (
@@ -74,7 +144,6 @@ export default function Scan() {
       </Head>
 
       <div className="min-h-screen bg-gray-50">
-        {/* Header */}
         <header className="bg-white shadow">
           <div className="max-w-7xl mx-auto px-4 py-6 flex justify-between items-center">
             <h1 className="text-2xl font-bold text-gray-900">📷 Scan & Extract</h1>
@@ -84,19 +153,14 @@ export default function Scan() {
           </div>
         </header>
 
-        {/* Main Content */}
         <main className="max-w-4xl mx-auto px-4 py-8">
           {!extractionResult ? (
-            // Input Form
             <div className="bg-white rounded-lg shadow p-8">
               <h2 className="text-xl font-bold text-gray-800 mb-6">Product Details</h2>
-              
+
               <div className="space-y-6">
-                {/* Product Selection */}
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Select Mock Product
-                  </label>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Select Mock Product</label>
                   <select
                     value={selectedProduct}
                     onChange={(e) => setSelectedProduct(e.target.value)}
@@ -111,30 +175,14 @@ export default function Scan() {
                   </select>
                 </div>
 
-                {/* Product Name */}
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Product Name (Override)
-                  </label>
-                  <input
-                    type="text"
-                    value={productName}
-                    onChange={(e) => setProductName(e.target.value)}
-                    placeholder="Enter product name"
-                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Product Name (Override)</label>
+                  <input type="text" value={productName} onChange={(e) => setProductName(e.target.value)} placeholder="Enter product name" className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
                 </div>
 
-                {/* Category */}
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Category
-                  </label>
-                  <select
-                    value={category}
-                    onChange={(e) => setCategory(e.target.value)}
-                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  >
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Category</label>
+                  <select value={category} onChange={(e) => setCategory(e.target.value)} className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
                     <option value="">Select category...</option>
                     <option value="FMCG - Personal Care">FMCG - Personal Care</option>
                     <option value="FMCG - Cooking Oil">FMCG - Cooking Oil</option>
@@ -144,53 +192,63 @@ export default function Scan() {
                   </select>
                 </div>
 
-                {/* Store Location */}
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Store Location
-                  </label>
-                  <input
-                    type="text"
-                    value={location}
-                    onChange={(e) => setLocation(e.target.value)}
-                    placeholder="e.g., Mumbai Store, Bangalore Market"
-                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Store Location</label>
+                  <input type="text" value={location} onChange={(e) => setLocation(e.target.value)} placeholder="e.g., Mumbai Store, Bangalore Market" className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
                 </div>
 
-                {/* Extract Button */}
-                <button
-                  onClick={handleExtract}
-                  disabled={isExtracting}
-                  className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-bold py-3 px-4 rounded-lg transition-colors"
-                >
-                  {isExtracting ? '🔄 Extracting...' : '📷 Extract Data from Image'}
-                </button>
+                <div className="bg-gray-50 p-4 rounded">
+                  <h3 className="font-semibold">Upload / Take Picture</h3>
+                  <p className="text-sm text-gray-600 mb-3">Use your device camera or upload an image of the product label.</p>
+                  <ImageUploader onResult={handleOcrResult} />
+                </div>
+
+                <div className="flex gap-2">
+                  <button onClick={handleExtractFallback} disabled={isExtracting} className="flex-1 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-bold py-3 px-4 rounded-lg transition-colors">
+                    Use selected mock product
+                  </button>
+
+                  <button className="flex-1 bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold py-3 px-4 rounded-lg transition-colors" onClick={() => alert('Upload or take a picture using the uploader above to run OCR.')}>
+                    Upload image to OCR (use uploader above)
+                  </button>
+                </div>
               </div>
             </div>
           ) : (
-            // Extraction Results
             <div className="space-y-6">
               <div className="bg-white rounded-lg shadow p-8">
                 <h2 className="text-xl font-bold text-gray-800 mb-6">Extraction Results</h2>
-                
+
+                {uploadedImageUrl && (
+                  <div className="mb-4 relative">
+                    <img ref={imgRef} src={uploadedImageUrl} alt="uploaded" style={{ maxWidth: '100%', height: 'auto' }} onLoad={() => { /* triggers reflow so overlays align */ }} />
+                    <div style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, pointerEvents: 'none' }}>
+                      {annotations.map((a, i) => (
+                        <div key={i} style={{ position: 'absolute', border: '2px solid rgba(59,130,246,0.8)', background: 'rgba(59,130,246,0.08)', borderRadius: 4, ...computeBoxStyle(a.boundingPoly?.vertices) }} />
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 <div className="space-y-4">
                   {Object.entries(extractionResult.extractions).map(([field, data]) => (
                     <div key={field} className="border border-gray-200 rounded-lg p-4">
-                      <div className="flex justify-between items-start">
-                        <div>
+                      <div className="flex justify-between items-start gap-4">
+                        <div className="flex-1">
                           <h3 className="font-bold text-gray-800 capitalize">{field.replace(/_/g, ' ')}</h3>
-                          <p className="text-gray-600 text-sm mt-1">{(data as any).value}</p>
+                          <input type="text" value={(data as any).value} onChange={(e) => {
+                            setExtractionResult(prev => {
+                              if (!prev) return prev;
+                              return { ...prev, extractions: { ...prev.extractions, [field]: { ...(prev.extractions as any)[field], value: e.target.value, status: 'extracted' } } };
+                            });
+                          }} className="mt-1 w-full px-3 py-2 border border-gray-300 rounded" />
                         </div>
+
                         <div className="text-right">
-                          <span className={`inline-block px-3 py-1 rounded-full text-sm font-medium ${
-                            (data as any).status === 'extracted' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'
-                          }`}>
+                          <span className={`inline-block px-3 py-1 rounded-full text-sm font-medium ${(data as any).status === 'extracted' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'}`}>
                             {(data as any).status === 'extracted' ? '✓ Extracted' : '⚠ Review'}
                           </span>
-                          <p className="text-xs text-gray-500 mt-2">
-                            {Math.round((data as any).confidence * 100)}% confidence
-                          </p>
+                          <p className="text-xs text-gray-500 mt-2">{Math.round((data as any).confidence * 100)}% confidence</p>
                         </div>
                       </div>
                     </div>
@@ -198,20 +256,9 @@ export default function Scan() {
                 </div>
               </div>
 
-              {/* Action Buttons */}
               <div className="flex gap-4">
-                <button
-                  onClick={() => setExtractionResult(null)}
-                  className="flex-1 bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold py-2 px-4 rounded-lg transition-colors"
-                >
-                  ← Back
-                </button>
-                <button
-                  onClick={handleStartInspection}
-                  className="flex-1 bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-lg transition-colors"
-                >
-                  ✓ Continue to Verification
-                </button>
+                <button onClick={() => { setExtractionResult(null); setUploadedImageUrl(null); setAnnotations([]); }} className="flex-1 bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold py-2 px-4 rounded-lg transition-colors">← Back</button>
+                <button onClick={handleStartInspection} className="flex-1 bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-lg transition-colors">✓ Continue to Verification</button>
               </div>
             </div>
           )}
