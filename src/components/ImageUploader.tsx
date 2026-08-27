@@ -13,16 +13,19 @@ type OCRResult = {
 
 type Props = {
   onResult: (file: File | null, result: OCRResult) => void;
+  autoUpload?: boolean; // if false, wait for user to click "Upload to OCR"
 };
 
-export default function ImageUploader({ onResult }: Props) {
+export default function ImageUploader({ onResult, autoUpload = true }: Props) {
   const [filePreview, setFilePreview] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
 
-  const handleFile = (file: File | null) => {
+  const handleFileSelect = (file: File | null) => {
     if (!file) return;
     setFilePreview(URL.createObjectURL(file));
-    uploadFile(file);
+    setSelectedFile(file);
+    if (autoUpload) uploadFile(file);
   };
 
   const uploadFile = async (file: File) => {
@@ -53,7 +56,7 @@ export default function ImageUploader({ onResult }: Props) {
           type="file"
           accept="image/*"
           capture="environment"
-          onChange={(e) => handleFile(e.target.files?.[0] ?? null)}
+          onChange={(e) => handleFileSelect(e.target.files?.[0] ?? null)}
         />
       </div>
 
@@ -65,7 +68,7 @@ export default function ImageUploader({ onResult }: Props) {
             input.type = 'file';
             input.accept = 'image/*';
             input.capture = 'environment';
-            input.onchange = () => handleFile(input.files ? input.files[0] : null);
+            input.onchange = () => handleFileSelect(input.files ? input.files[0] : null);
             input.click();
           }}
           className="px-3 py-2 bg-blue-600 text-white rounded"
@@ -80,7 +83,27 @@ export default function ImageUploader({ onResult }: Props) {
         </div>
       )}
 
-      {uploading && <div>Processing OCR…</div>}
+      {!autoUpload && selectedFile && (
+        <div>
+          <button
+            type="button"
+            onClick={() => uploadFile(selectedFile)}
+            disabled={uploading}
+            className="mt-2 px-4 py-2 bg-indigo-600 text-white rounded"
+          >
+            {uploading ? 'Processing OCR…' : 'Upload to OCR'}
+          </button>
+          <button
+            type="button"
+            onClick={() => { setSelectedFile(null); setFilePreview(null); }}
+            className="ml-2 mt-2 px-4 py-2 bg-gray-200 text-gray-800 rounded"
+          >
+            Remove
+          </button>
+        </div>
+      )}
+
+      {autoUpload && uploading && <div>Processing OCR…</div>}
     </div>
   );
 }
