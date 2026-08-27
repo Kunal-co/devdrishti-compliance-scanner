@@ -1,9 +1,7 @@
+// src/pages/api/ocr.ts
 import type { NextApiRequest, NextApiResponse } from 'next';
 import formidable from 'formidable';
 import fs from 'fs';
-import os from 'os';
-import path from 'path';
-import { ImageAnnotatorClient } from '@google-cloud/vision';
 
 export const config = {
   api: {
@@ -11,21 +9,47 @@ export const config = {
   },
 };
 
-type Data = { text?: string; error?: string };
+type Annotation = {
+  description?: string;
+  boundingPoly?: { vertices?: { x?: number; y?: number }[] };
+};
 
-async function initVisionClient(): Promise<ImageAnnotatorClient> {
-  // If the service account JSON is provided as a base64 env var (GOOGLE_SERVICE_ACCOUNT),
-  // decode it and write to a temp file so the client library can pick it up.
-  const base64 = process.env.GOOGLE_SERVICE_ACCOUNT;
-  if (base64) {
-    const json = Buffer.from(base64, 'base64').toString('utf8');
-    const tmpDir = os.tmpdir();
-    const tmpPath = path.join(tmpDir, `gcloud-sa-${Date.now()}.json`);
-    fs.writeFileSync(tmpPath, json, { encoding: 'utf8' });
-    process.env.GOOGLE_APPLICATION_CREDENTIALS = tmpPath;
+type Data = { text?: string; annotations?: Annotation[]; error?: string };
+
+async function callVisionApi(base64Image: string) {
+  const apiKey = process.env.GOOGLE_API_KEY;
+  if (!apiKey) throw new Error('GOOGLE_API_KEY is not set in environment');
+
+  const endpoint = `https://vision.googleapis.com/v1/images:annotate?key=${encodeURIComponent(apiKey)}`;
+
+  const body = {
+    requests: [
+      {
+        image: { content: base64Image },
+        features: [
+          { type: 'TEXT_DETECTION', maxResults: 1 },
+          // Optionally include DOCUMENT_TEXT_DETECTION if you need layout-aware results:
+          // { type: 'DOCUMENT_TEXT_DETECTION', maxResults: 1 }
+        ],
+      },
+    ],
+  };
+
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`Vision API error ${res.status}: ${t}`);
   }
 
-  return new ImageAnnotatorClient();
+  const json = await res.json();
+  return json;
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse<Data>) {
@@ -35,11 +59,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse<
   }
 
   const form = new formidable.IncomingForm({ multiples: false });
-
   form.parse(req, async (err, _fields, files) => {
     if (err) {
       console.error('form parse error', err);
-      res.status(500).json({ error: 'Upload error' });
+      res.status(500).json({ error: 'Upload parse error' });
       return;
     }
 
@@ -50,17 +73,28 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse<
     }
 
     try {
-      const client = await initVisionClient();
       const buffer = fs.readFileSync(imageFile.filepath || imageFile.path);
+      const base64Image = buffer.toString('base64');
 
-      // Call Google Cloud Vision text detection
-      const [result] = await client.textDetection({ image: { content: buffer } });
-      const fullText = result.fullTextAnnotation?.text ?? '';
+      const visionResp = await callVisionApi(base64Image);
 
-      res.status(200).json({ text: fullText });
-    } catch (e) {
-      console.error('OCR error', e);
-      res.status(500).json({ error: 'OCR processing error' });
+      // Parse response: prefer fullTextAnnotation (DOCUMENT_TEXT_DETECTION) or textAnnotations
+      const resp0 = visionResp?.responses?.[0] || {};
+      const fullText = resp0.fullTextAnnotation?.text || resp0?.textAnnotations?.[0]?.description || '';
+
+      // Build token-level annotations from textAnnotations[1..]
+      const rawAnnotations = (resp0.textAnnotations || []).slice(1).map((a: any) => {
+        // Vision sometimes returns boundingPoly with vertices; vertices may omit x/y for some vertices.
+        return {
+          description: a.description,
+          boundingPoly: a.boundingPoly,
+        } as Annotation;
+      });
+
+      res.status(200).json({ text: fullText, annotations: rawAnnotations });
+    } catch (e: any) {
+      console.error('OCR handler error', e);
+      res.status(500).json({ error: e?.message || 'OCR processing error' });
     }
   });
 }
