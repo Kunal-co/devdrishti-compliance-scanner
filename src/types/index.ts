@@ -85,6 +85,7 @@ export interface InspectionReport {
   violations_count: number;
   store_location?: string;
   product_images: string[];
+  ocr_annotations?: any[];
   audit_log: AuditLogEntry[];
 }
 
