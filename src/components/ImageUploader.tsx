@@ -1,7 +1,18 @@
 import React, { useState } from 'react';
 
+type AnnotationVertex = { x?: number; y?: number };
+type Annotation = {
+  description?: string;
+  boundingPoly?: { vertices?: AnnotationVertex[] };
+};
+
+type OCRResult = {
+  text?: string;
+  annotations?: Annotation[];
+};
+
 type Props = {
-  onResult: (file: File | null, text: string) => void;
+  onResult: (file: File | null, result: OCRResult) => void;
 };
 
 export default function ImageUploader({ onResult }: Props) {
@@ -25,11 +36,11 @@ export default function ImageUploader({ onResult }: Props) {
         body: fd,
       });
       const data = await res.json();
-      // Expect server to return { text: '...' }
-      onResult(file, data.text || '');
+      // Expect server to return { text: '...', annotations: [...] }
+      onResult(file, { text: data.text || '', annotations: data.annotations || [] });
     } catch (err) {
       console.error('Upload/ocr error', err);
-      onResult(file, '');
+      onResult(file, { text: '', annotations: [] });
     } finally {
       setUploading(false);
     }
@@ -49,7 +60,7 @@ export default function ImageUploader({ onResult }: Props) {
       <div>
         <button
           type="button"
-          onClick={async () => {
+          onClick={() => {
             const input = document.createElement('input');
             input.type = 'file';
             input.accept = 'image/*';
