@@ -71,7 +71,7 @@ function parseForm(req: NextApiRequest) {
 // --- Google AI Studio (Gemini API) OCR call ---
 // Get a key from https://aistudio.google.com/apikey and set it as
 // GEMINI_API_KEY (or GOOGLE_API_KEY) in your .env.local file.
-const GEMINI_MODEL = 'gemini-2.5-flash-lite';
+const GEMINI_MODEL = 'gemini-2.5-flash';
 
 async function callGeminiOcr(base64Image: string, mimeType: string) {
   const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
