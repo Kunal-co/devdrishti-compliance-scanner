@@ -177,7 +177,16 @@ export const useInspectionStore = create<InspectionState>((set, get) => ({
   saveToHistory: () => {
     set((state) => {
       if (!state.currentInspection) return state;
-      const updated = [...state.inspectionHistory, state.currentInspection];
+      const alreadySaved = state.inspectionHistory.some(
+        (i) => i.inspection_id === state.currentInspection!.inspection_id
+      );
+      // Replace the existing entry instead of appending a duplicate if this
+      // inspection_id was already saved (e.g. a stray double-submit).
+      const updated = alreadySaved
+        ? state.inspectionHistory.map((i) =>
+            i.inspection_id === state.currentInspection!.inspection_id ? state.currentInspection! : i
+          )
+        : [...state.inspectionHistory, state.currentInspection];
       localStorage.setItem('inspection_history', JSON.stringify(updated));
       return {
         inspectionHistory: updated,
