@@ -10,6 +10,7 @@ export default function Verify() {
   const updateFinding = useInspectionStore((s) => s.updateFinding);
   const completeInspection = useInspectionStore((s) => s.completeInspection);
   const saveToHistory = useInspectionStore((s) => s.saveToHistory);
+  const clearCurrentInspection = useInspectionStore((s) => s.clearCurrentInspection);
   const [currentFieldIndex, setCurrentFieldIndex] = useState(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [localValue, setLocalValue] = useState('');
@@ -17,12 +18,12 @@ export default function Verify() {
 
   useEffect(() => {
     if (!currentInspection) {
-      router.push('/scan');
+      if (!isSubmitting) router.push('/scan');
       return;
     }
     const f = currentInspection.findings[currentFieldIndex];
     setLocalValue(f?.final_value ?? f?.ai_extraction ?? '');
-  }, [currentInspection, currentFieldIndex, router]);
+  }, [currentInspection, currentFieldIndex, router, isSubmitting]);
 
   if (!currentInspection) return <div>Loading...</div>;
 
@@ -54,11 +55,17 @@ export default function Verify() {
   };
 
   const handleSubmit = async () => {
+    if (isSubmitting) return; // prevent double-submit (e.g. rapid double-click) from saving twice
     setIsSubmitting(true);
     const hasNonCompliant = currentInspection.findings.some(f => f.ai_recommendation === 'NEEDS_REVIEW');
     completeInspection(hasNonCompliant ? 'NEEDS_FURTHER_ACTION' : 'COMPLIANT');
     saveToHistory();
-    setTimeout(() => router.push('/history'), 700);
+    setTimeout(() => {
+      // Remove the completed inspection from the store so revisiting /verify
+      // (e.g. via the back button) can't resubmit it and duplicate the history entry.
+      clearCurrentInspection();
+      router.push('/history');
+    }, 700);
   };
 
   return (
