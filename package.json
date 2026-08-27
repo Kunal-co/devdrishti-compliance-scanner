@@ -19,11 +19,12 @@
     "axios": "^1.6.0",
     "recharts": "^2.10.0",
     "jspdf": "^2.5.1",
-    "html2canvas": "^1.4.1",
+    "html2canvas": "^1.4.0",
     "lucide-react": "^0.294.0",
     "zustand": "^4.4.1",
     "date-fns": "^2.30.0",
-    "formidable": "^3.5.4"
+    "formidable": "^3.5.4",
+    "@google-cloud/vision": "^5.3.3"
   },
   "devDependencies": {
     "typescript": "^5.3.3",
