@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useImperativeHandle, forwardRef } from 'react';
 
 type AnnotationVertex = { x?: number; y?: number };
 type Annotation = {
@@ -16,7 +16,12 @@ type Props = {
   autoUpload?: boolean; // if false, wait for user to click "Upload to OCR"
 };
 
-export default function ImageUploader({ onResult, autoUpload = true }: Props) {
+export type ImageUploaderHandle = {
+  uploadSelected: () => Promise<void>;
+  hasSelected: () => boolean;
+};
+
+const ImageUploader = forwardRef<ImageUploaderHandle, Props>(({ onResult, autoUpload = true }, ref) => {
   const [filePreview, setFilePreview] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -48,6 +53,14 @@ export default function ImageUploader({ onResult, autoUpload = true }: Props) {
       setUploading(false);
     }
   };
+
+  useImperativeHandle(ref, () => ({
+    uploadSelected: async () => {
+      if (!selectedFile) return Promise.resolve();
+      await uploadFile(selectedFile);
+    },
+    hasSelected: () => !!selectedFile,
+  }));
 
   return (
     <div className="space-y-4">
@@ -106,4 +119,6 @@ export default function ImageUploader({ onResult, autoUpload = true }: Props) {
       {autoUpload && uploading && <div>Processing OCR…</div>}
     </div>
   );
-}
+});
+
+export default ImageUploader;
