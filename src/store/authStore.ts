@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { Inspector } from '@/types';
-import inspectorsData from '@/data/inspectorProfiles.json';
+import { inspectors } from '@/data/inspectorProfiles';
 
 interface AuthState {
   inspector: Inspector | null;
@@ -10,21 +10,17 @@ interface AuthState {
   getInspectorDetails: () => Inspector | null;
 }
 
-// Ensure the JSON data is treated as the correct typed shape
-const inspectorsList = (inspectorsData as unknown as { inspectors: Inspector[] }).inspectors;
-
 export const useAuthStore = create<AuthState>((set, get) => ({
   inspector: null,
   isLoggedIn: false,
 
   login: (inspectorId: string, password: string) => {
-    const inspector = inspectorsList.find(
+    const inspector = inspectors.find(
       (insp) => insp.id === inspectorId && insp.password === password
     );
 
     if (inspector) {
-      // Cast to Inspector to satisfy the typed store
-      set({ inspector: inspector as Inspector, isLoggedIn: true });
+      set({ inspector, isLoggedIn: true });
       localStorage.setItem('inspector_id', inspectorId);
       localStorage.setItem('inspector_name', inspector.name);
       return true;
