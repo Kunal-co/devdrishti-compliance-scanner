@@ -32,23 +32,59 @@ export default function Scan() {
 
   const products = Object.keys(mockOCRDatabase);
 
-  function parseOcrIntoExtractionResult(ocrText: string): ExtractionResult {
+  function parseOcrIntoExtractionResult(ocrText: string, ocrAnnotations: Annotation[] = []): ExtractionResult {
     const lines = ocrText.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-    const text = lines.join(' ');
-    const findMRP = text.match(/(Rs\.?|₹)\s?\d+(?:[.,]\d+)?/i);
-    const findQty = text.match(/\b\d+(?:[.,]\d+)?\s*(g|kg|ml|l|L)\b/i);
     const name = productName || lines[0] || selectedProduct || 'Unknown product';
-
     const now = new Date().toISOString();
+
+    // Field patterns, checked in this order. One line can satisfy at most
+    // ONE field, and once a field is filled it is locked — this is what
+    // stops something like the MRP line from also being read into, say,
+    // batch number, and vice versa.
+    const fieldPatterns: Record<string, RegExp> = {
+      mrp: /(mrp)?[:\s]*(rs\.?|₹|inr)\s?\d+(?:[.,]\d+)?/i,
+      net_quantity: /\b\d+(?:[.,]\d+)?\s*(g|kg|ml|l)\b/i,
+      date_of_manufacture: /(mfg|manufactur(ed|ing))?\s*(date)?[:\s]*\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}/i,
+      batch_number: /(batch|lot)\s*(no\.?)?[:\s]*[\w-]+/i,
+      country_of_origin: /country\s*of\s*origin[:\s]*[\w\s]+/i,
+      consumer_care: /(consumer|customer)\s*care[:\s].+/i,
+      manufacturer_name: /(mfd|manufactured)\s*by[:\s].+/i,
+      manufacturer_address: /(address|regd\.?\s*office)[:\s].+/i,
+    };
+
+    const assignedLineIdx = new Set<number>();
+    const found: Record<string, { value: string; bbox?: Annotation['boundingPoly'] }> = {};
+
+    lines.forEach((line, idx) => {
+      if (assignedLineIdx.has(idx)) return;
+      for (const [field, pattern] of Object.entries(fieldPatterns)) {
+        if (found[field]) continue; // field already locked, skip
+        if (pattern.test(line)) {
+          const matchingAnnotation = ocrAnnotations.find((a) => a.description === line);
+          found[field] = { value: line, bbox: matchingAnnotation?.boundingPoly };
+          assignedLineIdx.add(idx);
+          break;
+        }
+      }
+    });
+
+    const makeField = (field: string) => ({
+      value: found[field]?.value ?? '',
+      confidence: found[field] ? 0.85 : 0.4,
+      bounding_box: found[field]?.bbox ? JSON.stringify(found[field]!.bbox) : '',
+      status: (found[field] ? 'extracted' : 'needs_review') as 'extracted' | 'needs_review',
+    });
+
     const extractions: any = {
       product_name: { value: name, confidence: 0.9, bounding_box: '', status: 'extracted' },
-      net_quantity: { value: findQty ? findQty[0] : '', confidence: findQty ? 0.85 : 0.4, bounding_box: '', status: findQty ? 'extracted' : 'needs_review' },
-      mrp: { value: findMRP ? findMRP[0] : '', confidence: findMRP ? 0.85 : 0.4, bounding_box: '', status: findMRP ? 'extracted' : 'needs_review' },
-      manufacturer_name: { value: '', confidence: 0.4, bounding_box: '', status: 'needs_review' },
-      manufacturer_address: { value: '', confidence: 0.4, bounding_box: '', status: 'needs_review' },
-      date_of_manufacture: { value: '', confidence: 0.4, bounding_box: '', status: 'needs_review' },
-      consumer_care: { value: '', confidence: 0.4, bounding_box: '', status: 'needs_review' },
-      country_of_origin: { value: '', confidence: 0.4, bounding_box: '', status: 'needs_review' },
+      net_quantity: makeField('net_quantity'),
+      mrp: makeField('mrp'),
+      manufacturer_name: makeField('manufacturer_name'),
+      manufacturer_address: makeField('manufacturer_address'),
+      date_of_manufacture: makeField('date_of_manufacture'),
+      consumer_care: makeField('consumer_care'),
+      country_of_origin: makeField('country_of_origin'),
+      batch_number: makeField('batch_number'),
     };
 
     return {
@@ -59,7 +95,6 @@ export default function Scan() {
       extractions,
     };
   }
-
   // Called by ImageUploader via onResult(file, { text, annotations })
   const handleOcrResult = (file: File | null, result: { text?: string; annotations?: Annotation[] }) => {
     if (file) setUploadedImageUrl(URL.createObjectURL(file));
