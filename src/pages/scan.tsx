@@ -23,10 +23,6 @@ const FIELD_PATTERNS: Record<string, RegExp> = {
   manufacturer: /(manufactur(er|ed|ing)?|mfr\.?)\s*(by|name)?[:\s]+.+/i,
 };
 
-// A line that's JUST a field label with nothing meaningful after it —
-// e.g. OCR read "Manufacturer:" and "Acme Labs Pvt. Ltd." as two separate
-// lines because the label wraps visually on the actual label. We merge
-// these with the line right after them before running field matching.
 const LABEL_ONLY_PATTERNS: RegExp[] = [
   /^(mrp|m\.r\.p\.?|maximum retail price)\s*[:\-]?\s*$/i,
   /^net\s*(qty|quantity|wt|weight)\s*[:\-]?\s*$/i,
@@ -37,10 +33,7 @@ const LABEL_ONLY_PATTERNS: RegExp[] = [
   /^(manufactur(er|ed|ing)?|mfr\.?)\s*(by|name)?\s*[:\-]?\s*$/i,
 ];
 const isLabelOnly = (line: string) => LABEL_ONLY_PATTERNS.some((p) => p.test(line.trim()));
-
-// Words that mean "this line is UI/template chrome, never a real product
-// title" — stops a "PRODUCT IMAGE" placeholder graphic from beating out
-// the real title text.
+const matchesAnyField = (line: string) => Object.values(FIELD_PATTERNS).some((p) => p.test(line));
 const NON_TITLE_WORDS = /\b(image|photo|logo|placeholder|insert|barcode|sample photo|click here)\b/i;
 
 function cleanText(s: string): string {
@@ -52,14 +45,14 @@ function unionBbox(a?: Annotation['boundingPoly'], b?: Annotation['boundingPoly'
   if (!verts.length) return undefined;
   const xs = verts.map((v) => v.x ?? 0);
   const ys = verts.map((v) => v.y ?? 0);
-  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
-  return { vertices: [{ x: x0, y: y0 }, { x: x1, y: y0 }, { x: x1, y: y1 }, { x: x0, y: y1 }] };
+  return { vertices: [{ x: Math.min(...xs), y: Math.min(...ys) }, { x: Math.max(...xs), y: Math.min(...ys) }, { x: Math.max(...xs), y: Math.max(...ys) }, { x: Math.min(...xs), y: Math.max(...ys) }] };
 }
 
-/** Merges a label-only line ("Manufacturer:") with the next line
- *  ("Acme Labs Pvt. Ltd., Sample City") so field regexes — which expect
- *  label+value on one line — can actually match. */
-function mergeBrokenLabelLines(lines: string[], lineAnnotations: Annotation[]): { lines: string[]; annotations: Map<string, Annotation> } {
+/** Merges a label-only line ("Manufacturer:") with the line immediately
+ *  after it. Safe now that ImageUploader delivers lines in real top-to-
+ *  bottom, left-to-right order — "immediately after" now genuinely means
+ *  spatially next, not just next in an arbitrary OCR-internal array. */
+function mergeBrokenLabelLines(lines: string[], lineAnnotations: Annotation[]) {
   const mergedLines: string[] = [];
   const annotationMap = new Map<string, Annotation>();
   const findAnno = (line: string) => lineAnnotations.find((a) => a.description === line);
@@ -72,7 +65,7 @@ function mergeBrokenLabelLines(lines: string[], lineAnnotations: Annotation[]): 
       mergedLines.push(combined);
       const bbox = unionBbox(findAnno(line)?.boundingPoly, findAnno(next)?.boundingPoly);
       if (bbox) annotationMap.set(combined, { description: combined, boundingPoly: bbox, level: 'line' });
-      i++; // consumed the next line too
+      i++;
       continue;
     }
     mergedLines.push(line);
@@ -82,10 +75,10 @@ function mergeBrokenLabelLines(lines: string[], lineAnnotations: Annotation[]): 
   return { lines: mergedLines, annotations: annotationMap };
 }
 
-/** Finds the real product title by clustering adjacent lines that share
- *  the largest font size near the top of the image — instead of just
- *  picking whichever single line happens to be tallest, which is what
- *  let a placeholder graphic's caption win before. */
+/** Single best title candidate: largest text, near the top, that isn't a
+ *  label/value line and isn't UI chrome. No clustering — clustering was
+ *  what previously let the title balloon into neighboring subtitle/price
+ *  text when line order wasn't reliably sequential. */
 function detectProductName(lines: string[], lineAnnotations: Annotation[]): { text: string; bbox?: Annotation['boundingPoly'] } | null {
   const metrics = lines
     .map((line, idx) => {
@@ -95,34 +88,17 @@ function detectProductName(lines: string[], lineAnnotations: Annotation[]): { te
       const height = ys.length ? Math.max(...ys) - Math.min(...ys) : 0;
       const topY = ys.length ? Math.min(...ys) : 1;
       const letterCount = (line.match(/[A-Za-z]/g) || []).length;
-      return { line, idx, height, topY, letterCount, vertices };
+      return { line, idx, height, topY, letterCount, bbox: anno?.boundingPoly };
     })
-    .filter((m) => m.letterCount >= 2 && m.line.length <= 60 && !NON_TITLE_WORDS.test(m.line));
+    .filter((m) => m.letterCount >= 2 && m.line.length <= 45 && !NON_TITLE_WORDS.test(m.line) && !isLabelOnly(m.line) && !matchesAnyField(m.line));
 
   if (!metrics.length) return null;
 
-  const topCandidates = metrics.filter((m) => m.topY <= 0.6);
+  const topCandidates = metrics.filter((m) => m.topY <= 0.5);
   const pool = topCandidates.length ? topCandidates : metrics;
+  pool.sort((a, b) => b.height - a.height || a.idx - b.idx);
 
-  const tallest = [...pool].sort((a, b) => b.height - a.height)[0];
-  // Cluster contiguous lines with a similar font height into one title —
-  // this is what stitches a wrapped "TEST" / "PRODUCT" pair back together.
-  const band = pool.filter((m) => tallest.height === 0 || Math.abs(m.height - tallest.height) / tallest.height < 0.35);
-  band.sort((a, b) => a.idx - b.idx);
-  const tallestPos = band.findIndex((b) => b.idx === tallest.idx);
-  let start = tallestPos, end = tallestPos;
-  while (start > 0 && band[start - 1].idx === band[start].idx - 1) start--;
-  while (end < band.length - 1 && band[end + 1].idx === band[end].idx + 1) end++;
-  const cluster = band.slice(start, end + 1);
-
-  const text = cleanText(cluster.map((c) => c.line).join(' '));
-  const allVerts = cluster.flatMap((c) => c.vertices);
-  let bbox: Annotation['boundingPoly'] | undefined;
-  if (allVerts.length) {
-    const xs = allVerts.map((v) => v.x ?? 0), ys = allVerts.map((v) => v.y ?? 0);
-    bbox = { vertices: [{ x: Math.min(...xs), y: Math.min(...ys) }, { x: Math.max(...xs), y: Math.min(...ys) }, { x: Math.max(...xs), y: Math.max(...ys) }, { x: Math.min(...xs), y: Math.max(...ys) }] };
-  }
-  return { text, bbox };
+  return { text: pool[0].line, bbox: pool[0].bbox };
 }
 
 export default function Scan() {
@@ -146,13 +122,11 @@ export default function Scan() {
   const [overlayTick, setOverlayTick] = useState(0);
   const imgRef = useRef<HTMLImageElement | null>(null);
   const uploaderRef = useRef<ImageUploaderHandle | null>(null);
+  const fieldRefs = useRef<Record<string, HTMLInputElement | null>>({});
 
   const products = Object.keys(mockOCRDatabase);
   const bumpOverlay = useCallback(() => setOverlayTick((t) => t + 1), []);
 
-  // Belt-and-braces re-render: onLoad alone can race with the results view
-  // mounting, which is why boxes sometimes never appeared. This guarantees
-  // at least one recompute after the image is actually painted.
   useEffect(() => {
     if (!uploadedImageUrl) return;
     if (imgRef.current?.complete) bumpOverlay();
@@ -170,7 +144,6 @@ export default function Scan() {
     const nameResult = detectProductName(rawLines, lineAnnotations);
     const name = cleanText(productName) || nameResult?.text || selectedProduct || 'Unknown product';
 
-    // Merge two-line "Label:" / "value" pairs before matching fields.
     const { lines, annotations: mergedAnnoMap } = mergeBrokenLabelLines(rawLines, lineAnnotations);
     const findBbox = (line: string) => mergedAnnoMap.get(line)?.boundingPoly ?? lineAnnotations.find((a) => a.description === line)?.boundingPoly;
 
@@ -236,13 +209,7 @@ export default function Scan() {
       batch_number: makeField(found.batch_number?.value ?? '', found.batch_number?.bbox),
     };
 
-    return {
-      product_id: selectedProduct || `OCR-${Date.now()}`,
-      product_name: name,
-      category: category || 'unknown',
-      timestamp: now,
-      extractions,
-    };
+    return { product_id: selectedProduct || `OCR-${Date.now()}`, product_name: name, category: category || 'unknown', timestamp: now, extractions };
   }
 
   const handleOcrResult = (file: File | null, result: { text?: string; annotations?: Annotation[] }) => {
@@ -302,11 +269,29 @@ export default function Scan() {
   };
 
   const hasSelected = uploaderRef.current?.hasSelected() ?? false;
-  const activeFieldBbox = activeField && extractionResult ? (extractionResult.extractions as any)[activeField]?.bounding_box : null;
-  let activeVertices: Vertex[] | undefined;
-  if (activeFieldBbox) {
-    try { activeVertices = JSON.parse(activeFieldBbox)?.vertices; } catch { activeVertices = undefined; }
+
+  // Boxes that were actually USED to fill a field — these get the orange
+  // "used" treatment and are clickable to jump to that field.
+  const usedBoxes: { field: string; vertices: Vertex[] }[] = [];
+  if (extractionResult) {
+    Object.entries(extractionResult.extractions).forEach(([field, data]) => {
+      const bboxStr = (data as any).bounding_box;
+      if (!bboxStr) return;
+      try {
+        const vertices = JSON.parse(bboxStr)?.vertices;
+        if (vertices?.length) usedBoxes.push({ field, vertices });
+      } catch {}
+    });
   }
+
+  const selectField = (field: string) => {
+    setActiveField(field);
+    const el = fieldRefs.current[field];
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.focus();
+    }
+  };
 
   return (
     <>
@@ -319,7 +304,7 @@ export default function Scan() {
           </div>
         </header>
 
-        <main className="max-w-4xl mx-auto px-4 py-8">
+        <main className={`mx-auto px-4 py-8 ${extractionResult ? 'max-w-7xl' : 'max-w-4xl'}`}>
           {!extractionResult ? (
             <div className="bg-white rounded-lg shadow p-8">
               <h2 className="text-xl font-bold text-gray-800 mb-6">Product Details</h2>
@@ -375,52 +360,81 @@ export default function Scan() {
             </div>
           ) : (
             <div className="space-y-6">
-              <div className="bg-white rounded-lg shadow p-8">
-                <h2 className="text-xl font-bold text-gray-800 mb-6">Extraction Results</h2>
+              <div className="bg-white rounded-lg shadow p-8 lg:flex lg:gap-8 lg:items-start">
                 {uploadedImageUrl && (
-                  <div className="mb-4 relative inline-block">
-                    <img ref={imgRef} src={uploadedImageUrl} alt="uploaded" style={{ maxWidth: '100%', height: 'auto', display: 'block' }} onLoad={bumpOverlay} />
-                    <div key={overlayTick} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, pointerEvents: 'none' }}>
-                      {annotations.filter((a) => a.level !== 'word').map((a, i) => (
-                        <div key={i} style={{ position: 'absolute', border: '2px solid rgba(59,130,246,0.6)', background: 'rgba(59,130,246,0.10)', borderRadius: 3, ...computeBoxStyle(a.boundingPoly?.vertices) }} />
-                      ))}
-                      {activeVertices && (
-                        <div style={{ position: 'absolute', border: '3px solid rgba(22,163,74,0.95)', background: 'rgba(22,163,74,0.18)', borderRadius: 4, boxShadow: '0 0 0 2px rgba(255,255,255,0.7)', ...computeBoxStyle(activeVertices) }} />
-                      )}
-                    </div>
-                  </div>
-                )}
-                {uploadedImageUrl && <p className="text-xs text-gray-500 mb-4">Blue boxes show everything OCR matched. Click a field below to highlight exactly where its value came from (green).</p>}
-
-                <div className="space-y-4">
-                  {Object.entries(extractionResult.extractions).map(([field, data]) => (
-                    <div key={field} className="border border-gray-200 rounded-lg p-4">
-                      <div className="flex justify-between items-start gap-4">
-                        <div className="flex-1">
-                          <h3 className="font-bold text-gray-800 capitalize">{field.replace(/_/g, ' ')}</h3>
-                          <input
-                            type="text"
-                            value={(data as any).value}
-                            onFocus={() => setActiveField(field)}
-                            onBlur={() => setActiveField((cur) => (cur === field ? null : cur))}
-                            onChange={(e) => {
-                              setExtractionResult((prev) => {
-                                if (!prev) return prev;
-                                return { ...prev, extractions: { ...prev.extractions, [field]: { ...(prev.extractions as any)[field], value: e.target.value, status: 'extracted' } } };
-                              });
-                            }}
-                            className={`mt-1 w-full px-3 py-2 border rounded ${activeField === field ? 'border-green-500 ring-2 ring-green-200' : 'border-gray-300'}`}
-                          />
-                        </div>
-                        <div className="text-right">
-                          <span className={`inline-block px-3 py-1 rounded-full text-sm font-medium ${(data as any).status === 'extracted' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'}`}>
-                            {(data as any).status === 'extracted' ? '✓ Extracted' : '⚠ Review'}
-                          </span>
-                          <p className="text-xs text-gray-500 mt-2">{Math.round((data as any).confidence * 100)}% confidence</p>
-                        </div>
+                  <div className="lg:w-1/2 lg:sticky lg:top-8 mb-6 lg:mb-0">
+                    <div className="relative inline-block w-full">
+                      <img ref={imgRef} src={uploadedImageUrl} alt="uploaded" style={{ maxWidth: '100%', height: 'auto', display: 'block' }} onLoad={bumpOverlay} />
+                      <div key={overlayTick} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }}>
+                        {/* All scanned text — blue, informational only, click-through */}
+                        {annotations.filter((a) => a.level !== 'word').map((a, i) => (
+                          <div key={`scan-${i}`} style={{ position: 'absolute', pointerEvents: 'none', border: '2px solid rgba(59,130,246,0.55)', background: 'rgba(59,130,246,0.08)', borderRadius: 3, ...computeBoxStyle(a.boundingPoly?.vertices) }} />
+                        ))}
+                        {/* Boxes actually used for a field — orange, clickable, turns green when active */}
+                        {usedBoxes.map(({ field, vertices }, i) => {
+                          const active = activeField === field;
+                          return (
+                            <div
+                              key={`used-${field}-${i}`}
+                              onClick={() => selectField(field)}
+                              title={`Click to jump to "${field.replace(/_/g, ' ')}"`}
+                              style={{
+                                position: 'absolute',
+                                cursor: 'pointer',
+                                pointerEvents: 'auto',
+                                border: active ? '3px solid rgba(22,163,74,0.95)' : '2px solid rgba(249,115,22,0.9)',
+                                background: active ? 'rgba(22,163,74,0.20)' : 'rgba(249,115,22,0.14)',
+                                borderRadius: 4,
+                                boxShadow: active ? '0 0 0 2px rgba(255,255,255,0.7)' : 'none',
+                                transition: 'background 0.15s, border 0.15s',
+                                ...computeBoxStyle(vertices),
+                              }}
+                            />
+                          );
+                        })}
                       </div>
                     </div>
-                  ))}
+                    <p className="text-xs text-gray-500 mt-3">
+                      <span className="inline-block w-3 h-3 align-middle mr-1 rounded-sm" style={{ background: 'rgba(59,130,246,0.35)', border: '1px solid rgba(59,130,246,0.7)' }} /> scanned text &nbsp;
+                      <span className="inline-block w-3 h-3 align-middle mr-1 rounded-sm" style={{ background: 'rgba(249,115,22,0.3)', border: '1px solid rgba(249,115,22,0.9)' }} /> used in a field (click it) &nbsp;
+                      <span className="inline-block w-3 h-3 align-middle mr-1 rounded-sm" style={{ background: 'rgba(22,163,74,0.3)', border: '1px solid rgba(22,163,74,0.9)' }} /> currently selected
+                    </p>
+                  </div>
+                )}
+
+                <div className="lg:w-1/2">
+                  <h2 className="text-xl font-bold text-gray-800 mb-6">Extraction Results</h2>
+                  <div className="space-y-4">
+                    {Object.entries(extractionResult.extractions).map(([field, data]) => (
+                      <div key={field} className={`border rounded-lg p-4 transition-colors ${activeField === field ? 'border-green-400 bg-green-50' : 'border-gray-200'}`}>
+                        <div className="flex justify-between items-start gap-4">
+                          <div className="flex-1">
+                            <h3 className="font-bold text-gray-800 capitalize">{field.replace(/_/g, ' ')}</h3>
+                            <input
+                              ref={(el) => { fieldRefs.current[field] = el; }}
+                              type="text"
+                              value={(data as any).value}
+                              onFocus={() => setActiveField(field)}
+                              onBlur={() => setActiveField((cur) => (cur === field ? null : cur))}
+                              onChange={(e) => {
+                                setExtractionResult((prev) => {
+                                  if (!prev) return prev;
+                                  return { ...prev, extractions: { ...prev.extractions, [field]: { ...(prev.extractions as any)[field], value: e.target.value, status: 'extracted' } } };
+                                });
+                              }}
+                              className={`mt-1 w-full px-3 py-2 border rounded ${activeField === field ? 'border-green-500 ring-2 ring-green-200' : 'border-gray-300'}`}
+                            />
+                          </div>
+                          <div className="text-right">
+                            <span className={`inline-block px-3 py-1 rounded-full text-sm font-medium ${(data as any).status === 'extracted' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'}`}>
+                              {(data as any).status === 'extracted' ? '✓ Extracted' : '⚠ Review'}
+                            </span>
+                            <p className="text-xs text-gray-500 mt-2">{Math.round((data as any).confidence * 100)}% confidence</p>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </div>
 
