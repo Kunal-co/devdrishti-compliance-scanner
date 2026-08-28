@@ -23,13 +23,11 @@
     "lucide-react": "^0.294.0",
     "zustand": "^4.4.1",
     "date-fns": "^2.30.0",
-    "formidable": "^3.5.4",
-    "@google-cloud/vision": "^5.3.3"
+    "tesseract.js": "^5.1.1"
   },
   "devDependencies": {
     "typescript": "^5.3.3",
     "@types/react": "^18.2.37",
-    "@types/node": "^20.9.0",
-    "@types/formidable": "^3.4.5"
+    "@types/node": "^20.9.0"
   }
 }
