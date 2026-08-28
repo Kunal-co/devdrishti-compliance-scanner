@@ -23,7 +23,8 @@
     "lucide-react": "^0.294.0",
     "zustand": "^4.4.1",
     "date-fns": "^2.30.0",
-    "tesseract.js": "^5.1.1"
+    "tesseract.js": "^5.1.1",
+    "formidable": "^3.5.4"
   },
   "devDependencies": {
     "typescript": "^5.3.3",
