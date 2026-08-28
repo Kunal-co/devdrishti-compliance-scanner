@@ -35,7 +35,7 @@ export interface ExtractionResult {
     date_of_manufacture: ExtractedField;
     consumer_care: ExtractedField;
     country_of_origin: ExtractedField;
-    batch_number?: ExtractedField;
+    batch_number: ExtractedField;
   };
 }
 
