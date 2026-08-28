@@ -99,7 +99,7 @@ export default function Scan() {
   const handleOcrResult = (file: File | null, result: { text?: string; annotations?: Annotation[] }) => {
     if (file) setUploadedImageUrl(URL.createObjectURL(file));
     const text = result?.text ?? '';
-    const res = parseOcrIntoExtractionResult(text);
+    const res = parseOcrIntoExtractionResult(text, result.annotations || []);
     setExtractionResult(res);
     setAnnotations(result.annotations || []);
     setUploaderRunning(false);
