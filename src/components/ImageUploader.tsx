@@ -1,4 +1,5 @@
 import React, { useState, useImperativeHandle, forwardRef } from 'react';
+import Tesseract from 'tesseract.js';
 
 type AnnotationVertex = { x?: number; y?: number };
 type Annotation = {
@@ -13,7 +14,7 @@ type OCRResult = {
 
 type Props = {
   onResult: (file: File | null, result: OCRResult) => void;
-  autoUpload?: boolean; // if false, wait for user to click "Upload to OCR"
+  autoUpload?: boolean;
   onError?: (message: string) => void;
 };
 
@@ -22,9 +23,19 @@ export type ImageUploaderHandle = {
   hasSelected: () => boolean;
 };
 
+function getImageDimensions(file: File): Promise<{ width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
+    img.onerror = reject;
+    img.src = URL.createObjectURL(file);
+  });
+}
+
 const ImageUploader = forwardRef<ImageUploaderHandle, Props>(({ onResult, autoUpload = true, onError }, ref) => {
   const [filePreview, setFilePreview] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [progress, setProgress] = useState(0);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -32,36 +43,41 @@ const ImageUploader = forwardRef<ImageUploaderHandle, Props>(({ onResult, autoUp
     if (!file) return;
     setFilePreview(URL.createObjectURL(file));
     setSelectedFile(file);
-    if (autoUpload) uploadFile(file);
+    if (autoUpload) runOcr(file);
   };
 
-  const uploadFile = async (file: File) => {
+  const runOcr = async (file: File) => {
     setUploading(true);
+    setProgress(0);
     setErrorMsg(null);
     try {
-      const fd = new FormData();
-      fd.append('image', file);
+      const { width, height } = await getImageDimensions(file);
 
-      const res = await fetch('/api/ocr', {
-        method: 'POST',
-        body: fd,
+      const { data } = await Tesseract.recognize(file, 'eng', {
+        logger: (m) => {
+          if (m.status === 'recognizing text') setProgress(Math.round(m.progress * 100));
+        },
       });
 
-      let data: any = null;
-      try {
-        data = await res.json();
-      } catch {
-        throw new Error(`OCR request failed (status ${res.status})`);
-      }
+      // Convert Tesseract's pixel-space line boxes into the same
+      // normalized {description, boundingPoly:{vertices}} shape the
+      // rest of the app (scan.tsx overlay, verify.tsx) already expects.
+      const annotations: Annotation[] = (data.lines || [])
+        .filter((line) => line.text && line.text.trim().length > 0)
+        .map((line) => {
+          const { x0, y0, x1, y1 } = line.bbox;
+          const vertices: AnnotationVertex[] = [
+            { x: x0 / width, y: y0 / height },
+            { x: x1 / width, y: y0 / height },
+            { x: x1 / width, y: y1 / height },
+            { x: x0 / width, y: y1 / height },
+          ];
+          return { description: line.text.trim(), boundingPoly: { vertices } };
+        });
 
-      if (!res.ok) {
-        throw new Error(data?.error || `OCR request failed (status ${res.status})`);
-      }
-
-      // Expect server to return { text: '...', annotations: [...] }
-      onResult(file, { text: data.text || '', annotations: data.annotations || [] });
+      onResult(file, { text: data.text || '', annotations });
     } catch (err: any) {
-      console.error('Upload/ocr error', err);
+      console.error('Tesseract OCR error', err);
       const message = err?.message || 'OCR processing failed';
       setErrorMsg(message);
       onError?.(message);
@@ -74,7 +90,7 @@ const ImageUploader = forwardRef<ImageUploaderHandle, Props>(({ onResult, autoUp
   useImperativeHandle(ref, () => ({
     uploadSelected: async () => {
       if (!selectedFile) return Promise.resolve();
-      await uploadFile(selectedFile);
+      await runOcr(selectedFile);
     },
     hasSelected: () => !!selectedFile,
   }));
@@ -117,11 +133,11 @@ const ImageUploader = forwardRef<ImageUploaderHandle, Props>(({ onResult, autoUp
         <div>
           <button
             type="button"
-            onClick={() => uploadFile(selectedFile)}
+            onClick={() => runOcr(selectedFile)}
             disabled={uploading}
             className="mt-2 px-4 py-2 bg-indigo-600 text-white rounded"
           >
-            {uploading ? 'Processing OCR…' : 'Upload to OCR'}
+            {uploading ? `Scanning… ${progress}%` : 'Upload to OCR'}
           </button>
           <button
             type="button"
@@ -133,7 +149,7 @@ const ImageUploader = forwardRef<ImageUploaderHandle, Props>(({ onResult, autoUp
         </div>
       )}
 
-      {autoUpload && uploading && <div>Processing OCR…</div>}
+      {autoUpload && uploading && <div>Scanning… {progress}%</div>}
 
       {errorMsg && (
         <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">
