@@ -63,6 +63,7 @@ export interface Finding {
   decision_timestamp?: string;
   evidence_link: string;
   reason: string;
+  bounding_box?: string;
 }
 
 // Inspection Report
